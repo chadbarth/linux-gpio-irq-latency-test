@@ -4,7 +4,7 @@
  *                                                                             *
  ******************************************************************************/
 
-//#define BEAGLEBONE      // BB and BBB,   cable between p9/12 and p9/15
+#define BEAGLEBONE      // BB and BBB,   cable between p9/12 and p9/15
 //#define RASPBERRY_PI    // Raspberry Pi, cable between p1/16 and p1/18
 
 #include <linux/module.h>
@@ -19,10 +19,10 @@
 #include <asm/io.h>
 
 #define DRV_NAME           "test-irq-latency"
-#define TEST_INTERVAL      (HZ/100)
-#define NUM_TESTS          1024
+#define TEST_INTERVAL      (HZ * 15)
+#define NUM_TESTS          20
 
-#define MISSED_IRQ_MAX     (100)
+#define MISSED_IRQ_MAX     (5)
 
 
 struct irq_latency_test {
@@ -32,7 +32,7 @@ struct irq_latency_test {
    u8 irq_fired, irq_enabled;
    struct timer_list timer;
    u32 test_count;
-   unsigned long avg_nsecs, missed_irqs;
+   unsigned long long avg_nsecs, missed_irqs, max_nsecs, min_nsecs;
 };
 
 static struct irq_latency_test test_data;
@@ -62,16 +62,17 @@ test_irq_latency_timer_handler(unsigned long ptr)
    if (data->irq_fired) {
       struct timespec delta = timespec_sub(data->irq_time, data->gpio_time);
 
-         if (delta.tv_sec > 0) {
+         if (delta.tv_sec > 5) {
             printk(KERN_INFO DRV_NAME
-               " : GPIO IRQ triggered after > 1 sec, something is fishy.\n");
+               " : GPIO IRQ triggered after > 5 sec, something is fishy.\n");
             data->missed_irqs++;
          } else {
-            data->avg_nsecs = data->avg_nsecs ?
-               (unsigned long)(((unsigned long long)delta.tv_nsec +
-                  (unsigned long long)data->avg_nsecs) >> 1) :
-                  delta.tv_nsec;
+            unsigned long long nsecs = (unsigned long long)delta.tv_sec * 1000000000 + delta.tv_nsec;
+            if(nsecs < data->min_nsecs) data->min_nsecs = nsecs;
+            if(nsecs > data->max_nsecs) data->max_nsecs = nsecs;
 	   	   
+            printk(KERN_INFO DRV_NAME " : GPIO IRQ latency is %llu nsecs.\n", nsecs);
+
             test_ok = 1;
          }
 
@@ -82,8 +83,8 @@ test_irq_latency_timer_handler(unsigned long ptr)
 
    if (test_ok && ++data->test_count >= NUM_TESTS) {
       printk(KERN_INFO DRV_NAME
-         " : finished %u passes. average GPIO IRQ latency is %lu nsecs.\n",
-            NUM_TESTS, data->avg_nsecs);
+         " : finished %u passes. average GPIO IRQ latency is %llu nsecs. (%llu, %llu)\n",
+            NUM_TESTS, data->avg_nsecs, data->min_nsecs, data->max_nsecs);
 	   		
       goto stopTesting;
    } else {
@@ -148,7 +149,7 @@ test_irq_latency_init_module(void)
    err = request_any_context_irq(
       test_data.irq,
       test_irq_latency_interrupt_handler,
-      IRQF_TRIGGER_FALLING | IRQF_DISABLED,
+      IRQF_TRIGGER_FALLING,
       DRV_NAME,
       (void*)&test_data
    );
@@ -158,6 +159,9 @@ test_irq_latency_init_module(void)
       goto err_free_irq_return;
    } else
       test_data.irq_enabled = 1;
+
+   test_data.max_nsecs = 0;
+   test_data.min_nsecs = ULONG_MAX;
 	
    init_timer(&test_data.timer);
    test_data.timer.expires = jiffies + TEST_INTERVAL;
@@ -207,9 +211,9 @@ setup_pinmux(void)
 {
    int i;
    static u32 pins[] = {
-      AM33XX_CONTROL_BASE + 0x878,   // test pin (60): gpio1_28 (beaglebone p9/12)
+      AM33XX_CONTROL_BASE + 0x8D8,   // test pin (60): gpio1_28 (beaglebone p9/12)
       0x7 | (2 << 3),                //       mode 7 (gpio), PULLUP, OUTPUT
-      AM33XX_CONTROL_BASE + 0x840,   // irq pin (48): gpio1_16 (beaglebone p9/15)
+      AM33XX_CONTROL_BASE + 0x8DC,   // irq pin (48): gpio1_16 (beaglebone p9/15)
       0x7 | (2 << 3) | (1 << 5),     //       mode 7 (gpio), PULLUP, INPUT
    };
 
@@ -223,8 +227,8 @@ setup_pinmux(void)
       iounmap(addr);
    }
 
-   test_data.irq_pin = 48;
-   test_data.gpio_pin = 60;
+   test_data.irq_pin = 11;
+   test_data.gpio_pin = 10;
 
    return 0;
 }
